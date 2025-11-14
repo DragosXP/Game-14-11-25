@@ -28,7 +28,7 @@
     <div class="hint" style="white-space: pre-line;">
 	Use the arrow keys to move.
 	Z - move slowly
-	X - attack
+        X - attack (hold to charge shot)
 	C - dash
 	</div>
   </div>
@@ -71,7 +71,10 @@
     if (!keys.has(e.key)) {
       keys.add(e.key);
       if (dirKeys.has(e.key)) addDirection(e.key);
-      if ((e.key==='x'||e.key==='X') && !gameOver) tryStartAttack();
+      if ((e.key==='x'||e.key==='X') && !gameOver) {
+        startChargingShot();
+        tryStartAttack();
+      }
       if ((e.key==='c'||e.key==='C') && !gameOver) tryStartDash();
     }
   });
@@ -79,12 +82,19 @@
     if (keys.has(e.key)) {
       keys.delete(e.key);
       if (dirKeys.has(e.key)) removeDirection(e.key);
+      if (e.key==='x' || e.key==='X'){
+        if (chargingShot){
+          if (chargeReady) fireChargedShot();
+          cancelChargingShot();
+        }
+      }
     }
   });
 
   // --- Enemies ---
   const enemies = [];
   const projectiles = [];
+  const playerShots = [];
   const explosions = [];
   const ENEMY_HP = 3;
   const ENEMY_SIZE = PLAYER_SIZE;
@@ -103,21 +113,21 @@
     yellow: '#ffff00'
   };
 
-  const BLUE_DASH_RADIUS = 64;
+  const BLUE_DASH_RADIUS = 128;
   const BLUE_DASH_SPEED = 220;
   const BLUE_DASH_DURATION = 0.35;
   const BLUE_DASH_COOLDOWN = 2.0;
 
   const GREEN_SPEED = 46;
-  const GREEN_DETONATE_RADIUS = 16;
+  const GREEN_DETONATE_RADIUS = 32;
   const GREEN_FUSE = 0.6;
-  const GREEN_EXPLOSION_RADIUS = 64;
+  const GREEN_EXPLOSION_RADIUS = 128;
   const GREEN_EXPLOSION_DAMAGE = 2;
   const GREEN_EXPLOSION_DURATION = 0.4;
 
   const YELLOW_SPEED = 48;
   const YELLOW_RETREAT_SPEED = 60;
-  const YELLOW_STOP_RADIUS = 32;
+  const YELLOW_STOP_RADIUS = 64;
   const YELLOW_BUFFER = 4;
   const YELLOW_SHOOT_INTERVAL = 1.2;
   const YELLOW_BULLET_SPEED = 180;
@@ -153,11 +163,38 @@
   const KNOCKBACK_DISTANCE=14, KNOCKBACK_DURATION=0.12;
   const SCREEN_FLASH_DURATION=0.12, SCREEN_FLASH_ALPHA=0.05;
   const SHAKE_DURATION=0.15, SHAKE_AMPLITUDE=6;
+  const CHARGE_SHOT_TIME = 2.0;
+  const CHARGE_BULLET_SPEED = 300;
+  const CHARGE_BULLET_SIZE = 4;
   let shakeTime=0, attacking=false, attackTime=0, weaponFlashTime=0, screenFlashTime=0, cooldownTime=0;
+  let chargingShot=false, chargeTime=0, chargeReady=false;
 
   function tryStartAttack(){
     if (attacking || cooldownTime>0 || dashing) return;
     attacking=true; attackTime=0; weaponFlashTime=WEAPON_FLASH_DURATION; cooldownTime=ATTACK_COOLDOWN;
+  }
+
+  function startChargingShot(){
+    if (chargingShot || gameOver) return;
+    chargingShot=true; chargeTime=0; chargeReady=false;
+  }
+
+  function cancelChargingShot(){
+    chargingShot=false; chargeTime=0; chargeReady=false;
+  }
+
+  function fireChargedShot(){
+    if (!chargeReady || gameOver) return;
+    const dir=facingToVector(facing);
+    const len=Math.hypot(dir.x,dir.y)||1;
+    const vx=(dir.x/len)*CHARGE_BULLET_SPEED;
+    const vy=(dir.y/len)*CHARGE_BULLET_SPEED;
+    const c=center(player);
+    const size=CHARGE_BULLET_SIZE;
+    const offset=Math.max(player.w,player.h)/2 + 4;
+    const startX=c.x-size/2 + dir.x*offset;
+    const startY=c.y-size/2 + dir.y*offset;
+    playerShots.push({ x:startX, y:startY, w:size, h:size, vx, vy });
   }
 
   // --- Dash (diagonals + longer distance) ---
@@ -253,6 +290,12 @@
     if (invuln>0) invuln-=dt;
     if (shakeTime>0) shakeTime-=dt;
     if (dashCooldown>0) dashCooldown-=dt;
+    if (chargingShot){
+      chargeTime+=dt;
+      if (!chargeReady && chargeTime>=CHARGE_SHOT_TIME){
+        chargeReady=true;
+      }
+    }
 
     // Trail fade (clean & stable)
     for (let i=trail.length-1;i>=0;i--){
@@ -324,6 +367,28 @@
       if (e.y>inner.y+inner.h) e.y=inner.y+inner.h;
     }
 
+    // Player charged shots
+    for (let i=playerShots.length-1;i>=0;i--){
+      const shot=playerShots[i];
+      shot.x+=shot.vx*dt; shot.y+=shot.vy*dt;
+      if (shot.x+shot.w<inner.x || shot.x>inner.x+inner.w || shot.y+shot.h<inner.y || shot.y>inner.y+inner.h){
+        playerShots.splice(i,1);
+        continue;
+      }
+      let hit=false;
+      for (const e of enemies){
+        if (!e.alive) continue;
+        if (rectsOverlap(shot,e)){
+          damageEnemy(e,1,shot);
+          hit=true;
+          break;
+        }
+      }
+      if (hit){
+        playerShots.splice(i,1);
+      }
+    }
+
     // Yellow projectiles
     for (let i=projectiles.length-1;i>=0;i--){
       const p=projectiles[i];
@@ -386,6 +451,7 @@
     // Cleanup
     for (let i=enemies.length-1;i>=0;i--){ if (!enemies[i].alive) enemies.splice(i,1); }
     if (lives<=0) gameOver=true;
+    if (gameOver) cancelChargingShot();
   }
 
   function damageEnemy(enemy, amount, source){
@@ -511,6 +577,14 @@
     } else {
       ctx.fillStyle='#fff'; ctx.fillRect(player.x,player.y,player.w,player.h);
     }
+    if (chargingShot && chargeReady){
+      ctx.save();
+      ctx.strokeStyle='#66ccff';
+      ctx.lineWidth=2;
+      ctx.globalAlpha=0.8;
+      ctx.strokeRect(player.x-2, player.y-2, player.w+4, player.h+4);
+      ctx.restore();
+    }
 
     // Enemies
     for (const e of enemies){
@@ -535,6 +609,14 @@
         ctx.arc(e.x+e.w/2, e.y+e.h/2, GREEN_EXPLOSION_RADIUS*(0.85+0.1*pulse), 0, Math.PI*2);
         ctx.stroke();
         ctx.restore();
+      }
+    }
+
+    // Player charged projectiles
+    if (playerShots.length){
+      ctx.fillStyle='#66ccff';
+      for (const shot of playerShots){
+        ctx.fillRect(Math.round(shot.x), Math.round(shot.y), shot.w, shot.h);
       }
     }
 
