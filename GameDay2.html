@@ -84,30 +84,67 @@
 
   // --- Enemies ---
   const enemies = [];
+  const projectiles = [];
+  const explosions = [];
   const ENEMY_HP = 3;
-  const ENEMY_MIN = 12, ENEMY_MAX = 20;
+  const ENEMY_SIZE = PLAYER_SIZE;
 
   // SLOWER & LESS FREQUENT
-  const ENEMY_SPEED = 52;            // was ~70
+  const ENEMY_BASE_SPEED = 52;       // was ~70
   const ENEMY_SPAWN_INTERVAL = 2.0;  // was ~1.2
   const ENEMY_HIT_FLASH = 0.10;      // seconds
   let spawnTimer = ENEMY_SPAWN_INTERVAL;
 
-  function lerp(a,b,t){ return a+(b-a)*t; }
-  function colorBetween(t){
-    const r=Math.round(lerp(255,128,t)), g=Math.round(lerp(128,0,t)), b=Math.round(lerp(128,0,t));
-    return `rgb(${r},${g},${b})`;
-  }
+  const ENEMY_TYPES = ['red','blue','green','yellow'];
+  const ENEMY_COLORS = {
+    red: '#ff0000',
+    blue: '#0066ff',
+    green: '#00ff00',
+    yellow: '#ffff00'
+  };
+
+  const BLUE_DASH_RADIUS = 64;
+  const BLUE_DASH_SPEED = 220;
+  const BLUE_DASH_DURATION = 0.35;
+  const BLUE_DASH_COOLDOWN = 2.0;
+
+  const GREEN_SPEED = 46;
+  const GREEN_DETONATE_RADIUS = 16;
+  const GREEN_FUSE = 0.6;
+  const GREEN_EXPLOSION_RADIUS = 64;
+  const GREEN_EXPLOSION_DAMAGE = 2;
+  const GREEN_EXPLOSION_DURATION = 0.4;
+
+  const YELLOW_SPEED = 48;
+  const YELLOW_RETREAT_SPEED = 60;
+  const YELLOW_STOP_RADIUS = 32;
+  const YELLOW_BUFFER = 4;
+  const YELLOW_SHOOT_INTERVAL = 1.2;
+  const YELLOW_BULLET_SPEED = 180;
+  const YELLOW_BULLET_SIZE = 4;
+
   function spawnEnemy(){
     const inner = { x:BORDER_THICKNESS, y:BORDER_THICKNESS, w:WIDTH-2*BORDER_THICKNESS, h:HEIGHT-2*BORDER_THICKNESS };
-    const size = Math.floor(Math.random()*(ENEMY_MAX-ENEMY_MIN+1))+ENEMY_MIN;
+    const size = ENEMY_SIZE;
     const side = Math.floor(Math.random()*4), m=10;
     let x,y;
-    if(side===0){ x=inner.x+Math.random()*inner.w-size/2; y=inner.y-size-m; }
-    else if(side===1){ x=inner.x+inner.w+m; y=inner.y+Math.random()*inner.h-size/2; }
-    else if(side===2){ x=inner.x+Math.random()*inner.w-size/2; y=inner.y+inner.h+m; }
-    else { x=inner.x-size-m; y=inner.y+Math.random()*inner.h-size/2; }
-    enemies.push({ x,y,w:size,h:size,hp:ENEMY_HP,alive:true,kbTime:0,kbVx:0,kbVy:0,hitFlash:0,color:colorBetween(Math.random()) });
+    if(side===0){ x=inner.x+Math.random()*(inner.w-size); y=inner.y-size-m; }
+    else if(side===1){ x=inner.x+inner.w+m; y=inner.y+Math.random()*(inner.h-size); }
+    else if(side===2){ x=inner.x+Math.random()*(inner.w-size); y=inner.y+inner.h+m; }
+    else { x=inner.x-size-m; y=inner.y+Math.random()*(inner.h-size); }
+    const type = ENEMY_TYPES[Math.floor(Math.random()*ENEMY_TYPES.length)];
+    const enemy = {
+      x,y,w:size,h:size,hp:ENEMY_HP,alive:true,kbTime:0,kbVx:0,kbVy:0,hitFlash:0,
+      color:ENEMY_COLORS[type], type
+    };
+    if (type==='blue'){
+      enemy.dashing=false; enemy.dashTime=0; enemy.dashCooldown=0; enemy.dashVx=0; enemy.dashVy=0;
+    } else if (type==='green'){
+      enemy.detonating=false; enemy.detonateTimer=0;
+    } else if (type==='yellow'){
+      enemy.shootCooldown=Math.random()*YELLOW_SHOOT_INTERVAL;
+    }
+    enemies.push(enemy);
   }
 
   // --- Weapon / Attack ---
@@ -231,18 +268,81 @@
     const pC=center(player);
     for (const e of enemies){
       if (!e.alive) continue;
+      if (e.hitFlash>0) e.hitFlash-=dt;
       if (e.kbTime>0){
         const t=Math.min(dt,e.kbTime); e.x+=e.kbVx*t; e.y+=e.kbVy*t; e.kbTime-=t;
-      } else {
-        const c=center(e); let vx=pC.x-c.x, vy=pC.y-c.y; const len=Math.hypot(vx,vy)||1; vx/=len; vy/=len;
-        const sizeFactor=(ENEMY_MAX+ENEMY_MIN)/(e.w+e.h); const v=ENEMY_SPEED*sizeFactor;
-        e.x+=vx*v*dt; e.y+=vy*v*dt;
+        if (e.type==='blue'){ e.dashing=false; e.dashTime=0; }
+        continue;
       }
+
+      const c=center(e);
+      let vx=pC.x-c.x, vy=pC.y-c.y; const dist=Math.hypot(vx,vy)||1; vx/=dist; vy/=dist;
+
+      if (e.type==='red'){
+        e.x+=vx*ENEMY_BASE_SPEED*dt; e.y+=vy*ENEMY_BASE_SPEED*dt;
+      } else if (e.type==='blue'){
+        if (e.dashing){
+          e.x+=e.dashVx*dt; e.y+=e.dashVy*dt; e.dashTime-=dt;
+          if (e.dashTime<=0){ e.dashing=false; e.dashCooldown=BLUE_DASH_COOLDOWN; }
+        } else {
+          if (e.dashCooldown>0) e.dashCooldown-=dt;
+          if (dist<=BLUE_DASH_RADIUS && e.dashCooldown<=0){
+            e.dashing=true; e.dashTime=BLUE_DASH_DURATION;
+            e.dashVx=vx*BLUE_DASH_SPEED; e.dashVy=vy*BLUE_DASH_SPEED;
+            e.dashCooldown=BLUE_DASH_COOLDOWN;
+          } else {
+            e.x+=vx*ENEMY_BASE_SPEED*dt; e.y+=vy*ENEMY_BASE_SPEED*dt;
+          }
+        }
+      } else if (e.type==='green'){
+        if (e.detonating){
+          e.detonateTimer+=dt;
+          if (e.detonateTimer>=GREEN_FUSE){ triggerGreenExplosion(e); }
+        } else {
+          e.x+=vx*GREEN_SPEED*dt; e.y+=vy*GREEN_SPEED*dt;
+          if (dist<=GREEN_DETONATE_RADIUS){ e.detonating=true; e.detonateTimer=0; }
+        }
+        if (!e.alive) continue;
+      } else if (e.type==='yellow'){
+        if (dist>YELLOW_STOP_RADIUS+YELLOW_BUFFER){
+          e.x+=vx*YELLOW_SPEED*dt; e.y+=vy*YELLOW_SPEED*dt;
+        } else if (dist<YELLOW_STOP_RADIUS-YELLOW_BUFFER){
+          e.x-=vx*YELLOW_RETREAT_SPEED*dt; e.y-=vy*YELLOW_RETREAT_SPEED*dt;
+        }
+        if (e.shootCooldown>0) e.shootCooldown-=dt;
+        if (e.shootCooldown<=0 && dist>0){
+          spawnYellowProjectile(e, vx, vy);
+          e.shootCooldown=YELLOW_SHOOT_INTERVAL;
+        }
+      }
+
+      if (!e.alive) continue;
+
       if (e.x<inner.x-e.w) e.x=inner.x-e.w;
       if (e.y<inner.y-e.h) e.y=inner.y-e.h;
       if (e.x>inner.x+inner.w) e.x=inner.x+inner.w;
       if (e.y>inner.y+inner.h) e.y=inner.y+inner.h;
-      if (e.hitFlash>0) e.hitFlash-=dt;
+    }
+
+    // Yellow projectiles
+    for (let i=projectiles.length-1;i>=0;i--){
+      const p=projectiles[i];
+      p.x+=p.vx*dt; p.y+=p.vy*dt;
+      if (p.x+p.w<inner.x || p.x>inner.x+inner.w || p.y+p.h<inner.y || p.y>inner.y+inner.h){
+        projectiles.splice(i,1);
+        continue;
+      }
+      if (rectsOverlap(player,p)){
+        damagePlayer(1);
+        projectiles.splice(i,1);
+        continue;
+      }
+    }
+
+    // Explosion visuals
+    for (let i=explosions.length-1;i>=0;i--){
+      explosions[i].life-=dt;
+      if (explosions[i].life<=0) explosions.splice(i,1);
     }
 
     // Attack hits (weapon)
@@ -251,8 +351,7 @@
       for (const e of enemies){
         if (!e.alive) continue;
         if (rectsOverlap(wRect,e)){
-          e.hp-=1; e.hitFlash=ENEMY_HIT_FLASH;
-          if (e.hp<=0) e.alive=false; else applyKnockback(e,wRect);
+          damageEnemy(e,1,wRect);
           anyHit=true;
         }
       }
@@ -267,8 +366,7 @@
         if (dashHitSet.has(e)) continue;
         if (rectsOverlap(player,e)){
           dashHitSet.add(e);
-          e.hp-=1; e.hitFlash=ENEMY_HIT_FLASH;
-          if (e.hp<=0) e.alive=false; else applyKnockback(e,player);
+          damageEnemy(e,1,player);
           anyHit=true;
         }
       }
@@ -276,11 +374,11 @@
     }
 
     // Player damage (NO DAMAGE while dashing)
-    if (!dashing && invuln<=0){
+    if (!dashing){
       for (const e of enemies){
         if (!e.alive) continue;
         if (rectsOverlap(player,e)){
-          lives-=1; invuln=INVULN_TIME; shakeTime=SHAKE_DURATION; screenFlashTime=SCREEN_FLASH_DURATION; break;
+          if (damagePlayer(1)) break;
         }
       }
     }
@@ -288,6 +386,64 @@
     // Cleanup
     for (let i=enemies.length-1;i>=0;i--){ if (!enemies[i].alive) enemies.splice(i,1); }
     if (lives<=0) gameOver=true;
+  }
+
+  function damageEnemy(enemy, amount, source){
+    if (!enemy.alive) return;
+    enemy.hp-=amount;
+    enemy.hitFlash=ENEMY_HIT_FLASH;
+    if (enemy.hp<=0){
+      enemy.alive=false;
+      return;
+    }
+    if (source) applyKnockback(enemy, source);
+    if (enemy.type==='blue'){ enemy.dashing=false; enemy.dashTime=0; }
+  }
+
+  function damagePlayer(amount, {ignoreInvuln=false}={}){
+    if (gameOver) return false;
+    if (!ignoreInvuln && invuln>0) return false;
+    lives-=amount;
+    invuln=INVULN_TIME;
+    shakeTime=SHAKE_DURATION;
+    screenFlashTime=SCREEN_FLASH_DURATION;
+    if (lives<=0) gameOver=true;
+    return true;
+  }
+
+  function spawnYellowProjectile(enemy, dirX, dirY){
+    if (!enemy.alive) return;
+    const len=Math.hypot(dirX,dirY)||1;
+    const vx=(dirX/len)*YELLOW_BULLET_SPEED;
+    const vy=(dirY/len)*YELLOW_BULLET_SPEED;
+    const c=center(enemy);
+    const size=YELLOW_BULLET_SIZE;
+    projectiles.push({ x:c.x-size/2, y:c.y-size/2, w:size, h:size, vx, vy });
+  }
+
+  function spawnExplosionEffect(x,y){
+    explosions.push({ x, y, radius:GREEN_EXPLOSION_RADIUS, life:GREEN_EXPLOSION_DURATION, duration:GREEN_EXPLOSION_DURATION });
+  }
+
+  function triggerGreenExplosion(enemy){
+    if (!enemy.alive) return;
+    const origin=center(enemy);
+    enemy.alive=false; enemy.detonating=false;
+    spawnExplosionEffect(origin.x, origin.y);
+
+    const playerCenter=center(player);
+    const playerRadius=Math.max(player.w,player.h)/2;
+    if (Math.hypot(origin.x-playerCenter.x, origin.y-playerCenter.y) <= GREEN_EXPLOSION_RADIUS + playerRadius){
+      damagePlayer(GREEN_EXPLOSION_DAMAGE,{ignoreInvuln:true});
+    }
+
+    for (const other of enemies){
+      if (!other.alive || other===enemy) continue;
+      const oc=center(other);
+      if (Math.hypot(origin.x-oc.x, origin.y-oc.y) <= GREEN_EXPLOSION_RADIUS + Math.max(other.w,other.h)/2){
+        damageEnemy(other,GREEN_EXPLOSION_DAMAGE,null);
+      }
+    }
   }
 
   function applyKnockback(target, src){
@@ -359,13 +515,54 @@
     // Enemies
     for (const e of enemies){
       if (!e.alive) continue;
-      ctx.fillStyle=e.color; ctx.fillRect(e.x,e.y,e.w,e.h);
+      let color=e.color;
+      if (e.type==='blue' && e.dashing) color='#5cabff';
+      if (e.type==='green' && e.detonating) color='#66ff66';
+      ctx.fillStyle=color; ctx.fillRect(e.x,e.y,e.w,e.h);
       if (e.hitFlash>0){
         ctx.save();
         ctx.globalAlpha=0.05; ctx.fillStyle='#fff';
         ctx.fillRect(e.x,e.y,e.w,e.h);
         ctx.restore();
       }
+      if (e.type==='green' && e.detonating){
+        ctx.save();
+        const pulse=0.5+0.5*Math.sin((e.detonateTimer||0)*20);
+        ctx.globalAlpha=0.25+0.25*pulse;
+        ctx.strokeStyle='rgba(102,255,102,0.8)';
+        ctx.lineWidth=1.5;
+        ctx.beginPath();
+        ctx.arc(e.x+e.w/2, e.y+e.h/2, GREEN_EXPLOSION_RADIUS*(0.85+0.1*pulse), 0, Math.PI*2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Projectiles
+    if (projectiles.length){
+      ctx.fillStyle='#ffff66';
+      for (const p of projectiles){
+        ctx.fillRect(Math.round(p.x), Math.round(p.y), p.w, p.h);
+      }
+    }
+
+    // Explosion effects
+    for (const ex of explosions){
+      const t=Math.max(0,ex.life/ex.duration);
+      const radius=ex.radius*(1+0.15*(1-t));
+      ctx.save();
+      ctx.globalAlpha=0.35*t;
+      ctx.fillStyle='rgba(102,255,102,0.35)';
+      ctx.beginPath();
+      ctx.arc(ex.x, ex.y, radius, 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalAlpha=0.55*t;
+      ctx.strokeStyle='rgba(102,255,102,0.8)';
+      ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.arc(ex.x, ex.y, radius*0.9, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
     }
 
     // Weapon (hidden while dashing)
