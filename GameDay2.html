@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Top-Down Starter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #0a0a0a; /* page bg (outside the game) */
+      display: grid;
+      place-items: center;
+      font-family: system-ui, sans-serif;
+    }
+    canvas {
+      box-shadow: 0 0 24px rgba(255,255,255,0.08);
+      image-rendering: pixelated;
+      background: #000;
+    }
+    .hint { color:#cfcfcf; opacity:.75; margin-top:.5rem; font-size:.9rem; }
+  </style>
+</head>
+<body>
+  <div>
+    <canvas id="game" width="640" height="480"></canvas>
+    <div class="hint" style="white-space: pre-line;">
+	Use the arrow keys to move.
+	Z - move slowly
+	X - attack
+	C - dash
+	</div>
+  </div>
+
+<script>
+  // --- Setup ---
+  const WIDTH = 640, HEIGHT = 480;
+  const BORDER_THICKNESS = 8;
+  const PLAYER_SIZE = 16;
+  const SPEED = 200;
+  const SLOW_MULTIPLIER = 0.4;
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  const player = { x:(WIDTH-PLAYER_SIZE)/2, y:(HEIGHT-PLAYER_SIZE)/2, w:PLAYER_SIZE, h:PLAYER_SIZE };
+
+  // Lives & i-frames
+  let lives = 3;
+  const INVULN_TIME = 1.0; // after taking damage (not used during dash)
+  let invuln = 0;
+  let gameOver = false;
+
+  // Facing + input (first-pressed-wins)
+  let facing = 'down';
+  const keys = new Set();
+  const dirOrder = [];
+  const dirKeys = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight']);
+
+  function addDirection(k){ if(!dirOrder.includes(k)) dirOrder.push(k); }
+  function removeDirection(k){ const i=dirOrder.indexOf(k); if(i!==-1) dirOrder.splice(i,1); }
+  function currentFacingFromOrder(){
+    if (!dirOrder.length) return facing;
+    const k = dirOrder[0];
+    return k==='ArrowLeft'?'left':k==='ArrowRight'?'right':k==='ArrowUp'?'up':'down';
+  }
+
+  window.addEventListener('keydown', e=>{
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    if (!keys.has(e.key)) {
+      keys.add(e.key);
+      if (dirKeys.has(e.key)) addDirection(e.key);
+      if ((e.key==='x'||e.key==='X') && !gameOver) tryStartAttack();
+      if ((e.key==='c'||e.key==='C') && !gameOver) tryStartDash();
+    }
+  });
+  window.addEventListener('keyup', e=>{
+    if (keys.has(e.key)) {
+      keys.delete(e.key);
+      if (dirKeys.has(e.key)) removeDirection(e.key);
+    }
+  });
+
+  // --- Enemies ---
+  const enemies = [];
+  const ENEMY_HP = 3;
+  const ENEMY_MIN = 12, ENEMY_MAX = 20;
+
+  // SLOWER & LESS FREQUENT
+  const ENEMY_SPEED = 52;            // was ~70
+  const ENEMY_SPAWN_INTERVAL = 2.0;  // was ~1.2
+  const ENEMY_HIT_FLASH = 0.10;      // seconds
+  let spawnTimer = ENEMY_SPAWN_INTERVAL;
+
+  function lerp(a,b,t){ return a+(b-a)*t; }
+  function colorBetween(t){
+    const r=Math.round(lerp(255,128,t)), g=Math.round(lerp(128,0,t)), b=Math.round(lerp(128,0,t));
+    return `rgb(${r},${g},${b})`;
+  }
+  function spawnEnemy(){
+    const inner = { x:BORDER_THICKNESS, y:BORDER_THICKNESS, w:WIDTH-2*BORDER_THICKNESS, h:HEIGHT-2*BORDER_THICKNESS };
+    const size = Math.floor(Math.random()*(ENEMY_MAX-ENEMY_MIN+1))+ENEMY_MIN;
+    const side = Math.floor(Math.random()*4), m=10;
+    let x,y;
+    if(side===0){ x=inner.x+Math.random()*inner.w-size/2; y=inner.y-size-m; }
+    else if(side===1){ x=inner.x+inner.w+m; y=inner.y+Math.random()*inner.h-size/2; }
+    else if(side===2){ x=inner.x+Math.random()*inner.w-size/2; y=inner.y+inner.h+m; }
+    else { x=inner.x-size-m; y=inner.y+Math.random()*inner.h-size/2; }
+    enemies.push({ x,y,w:size,h:size,hp:ENEMY_HP,alive:true,kbTime:0,kbVx:0,kbVy:0,hitFlash:0,color:colorBetween(Math.random()) });
+  }
+
+  // --- Weapon / Attack ---
+  const LOOK_W = 4, LOOK_H = 8, PAD = 2;
+  const ATTACK_DURATION=0.12, LUNGE_DISTANCE=12, WEAPON_FLASH_DURATION=0.06, ATTACK_COOLDOWN=0.25;
+  const KNOCKBACK_DISTANCE=14, KNOCKBACK_DURATION=0.12;
+  const SCREEN_FLASH_DURATION=0.12, SCREEN_FLASH_ALPHA=0.05;
+  const SHAKE_DURATION=0.15, SHAKE_AMPLITUDE=6;
+  let shakeTime=0, attacking=false, attackTime=0, weaponFlashTime=0, screenFlashTime=0, cooldownTime=0;
+
+  function tryStartAttack(){
+    if (attacking || cooldownTime>0 || dashing) return;
+    attacking=true; attackTime=0; weaponFlashTime=WEAPON_FLASH_DURATION; cooldownTime=ATTACK_COOLDOWN;
+  }
+
+  // --- Dash (diagonals + longer distance) ---
+  const DASH_DURATION=0.15;
+  const DASH_DISTANCE=100;    // ↑ increased distance (was 60)
+  const DASH_COOLDOWN=0.50;
+  const TRAIL_SAMPLES=8, TRAIL_FADE=0.20;
+
+  let dashing=false, dashTime=0, dashCooldown=0, dashVx=0, dashVy=0, dashSpeed=0;
+  let dashHitSet=new Set();
+  const trail=[]; // {x,y,w,h,life}
+
+  function facingToVector(dir){ return dir==='left'?{x:-1,y:0}:dir==='right'?{x:1,y:0}:dir==='up'?{x:0,y:-1}:{x:0,y:1}; }
+  function getDashVector(){
+    let vx=0, vy=0;
+    if (keys.has('ArrowLeft'))  vx-=1;
+    if (keys.has('ArrowRight')) vx+=1;
+    if (keys.has('ArrowUp'))    vy-=1;
+    if (keys.has('ArrowDown'))  vy+=1;
+    if (vx!==0 || vy!==0){ const len=Math.hypot(vx,vy); return {x:vx/len,y:vy/len}; }
+    return facingToVector(facing);
+  }
+  function tryStartDash(){
+    if (dashing || dashCooldown>0 || gameOver) return;
+    const dir = getDashVector();
+    dashSpeed = DASH_DISTANCE / DASH_DURATION;
+    dashVx = dir.x * dashSpeed;
+    dashVy = dir.y * dashSpeed;
+    dashing=true; dashTime=0; dashCooldown=DASH_COOLDOWN; dashHitSet.clear();
+    // prime the first trail slice immediately so there's no gap
+    trail.push({x:player.x, y:player.y, w:player.w, h:player.h, life:TRAIL_FADE});
+    if (trail.length>TRAIL_SAMPLES) trail.shift();
+  }
+
+  // --- Helpers ---
+  function easeOutQuad(t){ return 1-(1-t)*(1-t); }
+  function rectsOverlap(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+  function center(o){ return {x:o.x+o.w/2,y:o.y+o.h/2}; }
+
+  // --- Loop ---
+  let last=performance.now();
+  function loop(now){
+    const dt=Math.min((now-last)/1000,0.033); last=now;
+    update(dt); render(); requestAnimationFrame(loop);
+  }
+
+  function update(dt){
+    if (gameOver) return;
+
+    // Facing updates from first-pressed
+    if (dirOrder.length>0) facing=currentFacingFromOrder();
+
+    // Movement
+    if (dashing){
+      // Trail sample BEFORE moving this frame to avoid jitter
+      trail.push({x:player.x, y:player.y, w:player.w, h:player.h, life:TRAIL_FADE});
+      if (trail.length>TRAIL_SAMPLES) trail.shift();
+
+      player.x+=dashVx*dt; player.y+=dashVy*dt;
+
+      const minX=BORDER_THICKNESS, minY=BORDER_THICKNESS;
+      const maxX=WIDTH-BORDER_THICKNESS-player.w, maxY=HEIGHT-BORDER_THICKNESS-player.h;
+      if (player.x<minX) player.x=minX;
+      if (player.y<minY) player.y=minY;
+      if (player.x>maxX) player.x=maxX;
+      if (player.y>maxY) player.y=maxY;
+
+      dashTime+=dt; if (dashTime>=DASH_DURATION){ dashing=false; dashTime=0; }
+    } else {
+      let dx=0, dy=0;
+      if (keys.has('ArrowLeft'))  dx-=1;
+      if (keys.has('ArrowRight')) dx+=1;
+      if (keys.has('ArrowUp'))    dy-=1;
+      if (keys.has('ArrowDown'))  dy+=1;
+      if (dx&&dy){ const inv=1/Math.sqrt(2); dx*=inv; dy*=inv; }
+      const slow=(keys.has('z')||keys.has('Z'))?SLOW_MULTIPLIER:1;
+      const sp=SPEED*slow;
+      player.x+=dx*sp*dt; player.y+=dy*sp*dt;
+
+      const minX=BORDER_THICKNESS, minY=BORDER_THICKNESS;
+      const maxX=WIDTH-BORDER_THICKNESS-player.w, maxY=HEIGHT-BORDER_THICKNESS-player.h;
+      if (player.x<minX) player.x=minX;
+      if (player.y<minY) player.y=minY;
+      if (player.x>maxX) player.x=maxX;
+      if (player.y>maxY) player.y=maxY;
+    }
+
+    // Timers
+    if (attacking){ attackTime+=dt; if (attackTime>=ATTACK_DURATION){ attacking=false; attackTime=0; } }
+    if (weaponFlashTime>0) weaponFlashTime-=dt;
+    if (screenFlashTime>0) screenFlashTime-=dt;
+    if (cooldownTime>0) cooldownTime-=dt;
+    if (invuln>0) invuln-=dt;
+    if (shakeTime>0) shakeTime-=dt;
+    if (dashCooldown>0) dashCooldown-=dt;
+
+    // Trail fade (clean & stable)
+    for (let i=trail.length-1;i>=0;i--){
+      trail[i].life-=dt;
+      if (trail[i].life<=0) trail.splice(i,1);
+    }
+
+    // Spawns (slower)
+    spawnTimer-=dt; if (spawnTimer<=0){ spawnTimer+=ENEMY_SPAWN_INTERVAL; spawnEnemy(); }
+
+    // Enemies update
+    const inner={x:BORDER_THICKNESS,y:BORDER_THICKNESS,w:WIDTH-2*BORDER_THICKNESS,h:HEIGHT-2*BORDER_THICKNESS};
+    const pC=center(player);
+    for (const e of enemies){
+      if (!e.alive) continue;
+      if (e.kbTime>0){
+        const t=Math.min(dt,e.kbTime); e.x+=e.kbVx*t; e.y+=e.kbVy*t; e.kbTime-=t;
+      } else {
+        const c=center(e); let vx=pC.x-c.x, vy=pC.y-c.y; const len=Math.hypot(vx,vy)||1; vx/=len; vy/=len;
+        const sizeFactor=(ENEMY_MAX+ENEMY_MIN)/(e.w+e.h); const v=ENEMY_SPEED*sizeFactor;
+        e.x+=vx*v*dt; e.y+=vy*v*dt;
+      }
+      if (e.x<inner.x-e.w) e.x=inner.x-e.w;
+      if (e.y<inner.y-e.h) e.y=inner.y-e.h;
+      if (e.x>inner.x+inner.w) e.x=inner.x+inner.w;
+      if (e.y>inner.y+inner.h) e.y=inner.y+inner.h;
+      if (e.hitFlash>0) e.hitFlash-=dt;
+    }
+
+    // Attack hits (weapon)
+    if (attacking){
+      const wRect=getWeaponRect(); let anyHit=false;
+      for (const e of enemies){
+        if (!e.alive) continue;
+        if (rectsOverlap(wRect,e)){
+          e.hp-=1; e.hitFlash=ENEMY_HIT_FLASH;
+          if (e.hp<=0) e.alive=false; else applyKnockback(e,wRect);
+          anyHit=true;
+        }
+      }
+      if (anyHit){ screenFlashTime=SCREEN_FLASH_DURATION; shakeTime=SHAKE_DURATION; }
+    }
+
+    // Dash contact damage
+    if (dashing){
+      let anyHit=false;
+      for (const e of enemies){
+        if (!e.alive) continue;
+        if (dashHitSet.has(e)) continue;
+        if (rectsOverlap(player,e)){
+          dashHitSet.add(e);
+          e.hp-=1; e.hitFlash=ENEMY_HIT_FLASH;
+          if (e.hp<=0) e.alive=false; else applyKnockback(e,player);
+          anyHit=true;
+        }
+      }
+      if (anyHit){ screenFlashTime=SCREEN_FLASH_DURATION; shakeTime=SHAKE_DURATION; }
+    }
+
+    // Player damage (NO DAMAGE while dashing)
+    if (!dashing && invuln<=0){
+      for (const e of enemies){
+        if (!e.alive) continue;
+        if (rectsOverlap(player,e)){
+          lives-=1; invuln=INVULN_TIME; shakeTime=SHAKE_DURATION; screenFlashTime=SCREEN_FLASH_DURATION; break;
+        }
+      }
+    }
+
+    // Cleanup
+    for (let i=enemies.length-1;i>=0;i--){ if (!enemies[i].alive) enemies.splice(i,1); }
+    if (lives<=0) gameOver=true;
+  }
+
+  function applyKnockback(target, src){
+    const sx=src.x+src.w/2, sy=src.y+src.h/2, ex=target.x+target.w/2, ey=target.y+target.h/2;
+    let vx=ex-sx, vy=ey-sy; const len=Math.hypot(vx,vy)||1; vx/=len; vy/=len;
+    const dist=KNOCKBACK_DISTANCE, dur=KNOCKBACK_DURATION;
+    target.kbVx=(vx*dist)/dur; target.kbVy=(vy*dist)/dur; target.kbTime=dur;
+  }
+
+  function getWeaponRect(){
+    let x,y,w,h;
+    if (facing==='up'){
+      w=LOOK_W; h=LOOK_H; x=player.x+(player.w-w)/2; y=player.y-h-PAD;
+      if (attacking) y-=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+    } else if (facing==='down'){
+      w=LOOK_W; h=LOOK_H; x=player.x+(player.w-w)/2; y=player.y+player.h+PAD;
+      if (attacking) y+=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+    } else if (facing==='left'){
+      w=LOOK_H; h=LOOK_W; x=player.x-w-PAD; y=player.y+(player.h-h)/2;
+      if (attacking) x-=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+    } else { // right
+      w=LOOK_H; h=LOOK_W; x=player.x+player.w+PAD; y=player.y+(player.h-h)/2;
+      if (attacking) x+=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+    }
+    return {x,y,w,h};
+  }
+
+  function getShakeOffset(){
+    if (shakeTime<=0) return {x:0,y:0};
+    const t=Math.max(0,Math.min(1,shakeTime/SHAKE_DURATION));
+    const amp=SHAKE_AMPLITUDE*t;
+    return {x:(Math.random()*2-1)*amp, y:(Math.random()*2-1)*amp};
+  }
+
+  function render(){
+    // Background
+    ctx.fillStyle='#000'; ctx.fillRect(0,0,WIDTH,HEIGHT);
+
+    // Clip to inner area
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(BORDER_THICKNESS,BORDER_THICKNESS,WIDTH-2*BORDER_THICKNESS,HEIGHT-2*BORDER_THICKNESS);
+    ctx.clip();
+
+    // Shake (border stays steady)
+    const shake=getShakeOffset(); ctx.save(); ctx.translate(shake.x,shake.y);
+
+    // ---- Trail (isolated state to avoid subtle alpha glitches) ----
+    ctx.save();
+    for (const t of trail){
+      const a=Math.max(0,t.life/TRAIL_FADE);
+      ctx.globalAlpha=a*0.9;
+      ctx.fillStyle='#fff';
+      ctx.fillRect(Math.round(t.x), Math.round(t.y), t.w, t.h);
+    }
+    ctx.restore(); // restores alpha to 1 cleanly
+
+    // Player (blink during i-frames; solid during dash)
+    if (!dashing){
+      if (invuln>0 && Math.floor(invuln*20)%2===0) {
+        // blink off
+      } else {
+        ctx.fillStyle='#fff'; ctx.fillRect(player.x,player.y,player.w,player.h);
+      }
+    } else {
+      ctx.fillStyle='#fff'; ctx.fillRect(player.x,player.y,player.w,player.h);
+    }
+
+    // Enemies
+    for (const e of enemies){
+      if (!e.alive) continue;
+      ctx.fillStyle=e.color; ctx.fillRect(e.x,e.y,e.w,e.h);
+      if (e.hitFlash>0){
+        ctx.save();
+        ctx.globalAlpha=0.05; ctx.fillStyle='#fff';
+        ctx.fillRect(e.x,e.y,e.w,e.h);
+        ctx.restore();
+      }
+    }
+
+    // Weapon (hidden while dashing)
+    if (!dashing){
+      const wr=getWeaponRect();
+      ctx.fillStyle=(weaponFlashTime>0)?'#fff':'#ff0';
+      ctx.fillRect(wr.x,wr.y,wr.w,wr.h);
+    }
+
+    ctx.restore(); // end shake translate
+
+    // Screen flash on hit
+    if (screenFlashTime>0){
+      ctx.save();
+      ctx.globalAlpha=SCREEN_FLASH_ALPHA; ctx.fillStyle='#fff';
+      ctx.fillRect(BORDER_THICKNESS,BORDER_THICKNESS,WIDTH-2*BORDER_THICKNESS,HEIGHT-2*BORDER_THICKNESS);
+      ctx.restore();
+    }
+
+    // HUD
+    ctx.fillStyle='#fff'; ctx.font='12px monospace';
+    ctx.fillText(`Lives: ${Math.max(lives,0)}`, BORDER_THICKNESS+6, BORDER_THICKNESS+14);
+
+    ctx.restore(); // end clip
+
+    // Border on top
+    ctx.lineWidth=BORDER_THICKNESS; ctx.strokeStyle='#fff';
+    const half=BORDER_THICKNESS/2; ctx.strokeRect(half,half,WIDTH-BORDER_THICKNESS,HEIGHT-BORDER_THICKNESS);
+
+    // Game Over
+    if (gameOver){
+      ctx.fillStyle='rgba(0,0,0,0.6)';
+      ctx.fillRect(BORDER_THICKNESS,BORDER_THICKNESS,WIDTH-2*BORDER_THICKNESS,HEIGHT-2*BORDER_THICKNESS);
+      ctx.fillStyle='#fff'; ctx.font='20px monospace'; ctx.textAlign='center';
+      ctx.fillText('GAME OVER', WIDTH/2, HEIGHT/2); ctx.textAlign='start';
+    }
+  }
+
+  render(); requestAnimationFrame(loop);
+</script>
+
+
+</body>
+</html>
