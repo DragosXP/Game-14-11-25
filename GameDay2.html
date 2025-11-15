@@ -113,6 +113,9 @@
     yellow: '#ffff00'
   };
 
+  const RED_ATTACK_RANGE = WEAPON_LENGTH + WEAPON_OFFSET;
+  const ENEMY_WEAPON_COLOR = '#ff0000';
+
   const BLUE_DASH_RADIUS = 128;
   const BLUE_DASH_SPEED = 220;
   const BLUE_DASH_DURATION = 0.35;
@@ -145,9 +148,11 @@
     const type = ENEMY_TYPES[Math.floor(Math.random()*ENEMY_TYPES.length)];
     const enemy = {
       x,y,w:size,h:size,hp:ENEMY_HP,alive:true,kbTime:0,kbVx:0,kbVy:0,hitFlash:0,
-      color:ENEMY_COLORS[type], type
+      color:ENEMY_COLORS[type], type, facing:'down'
     };
-    if (type==='blue'){
+    if (type==='red'){
+      enemy.attacking=false; enemy.attackTime=0; enemy.attackCooldown=Math.random()*ATTACK_COOLDOWN; enemy.weaponHit=false;
+    } else if (type==='blue'){
       enemy.dashing=false; enemy.dashTime=0; enemy.dashCooldown=0; enemy.dashVx=0; enemy.dashVy=0;
     } else if (type==='green'){
       enemy.detonating=false; enemy.detonateTimer=0;
@@ -158,8 +163,8 @@
   }
 
   // --- Weapon / Attack ---
-  const LOOK_W = 4, LOOK_H = 8, PAD = 2;
-  const ATTACK_DURATION=0.12, LUNGE_DISTANCE=12, WEAPON_FLASH_DURATION=0.06, ATTACK_COOLDOWN=0.25;
+  const ATTACK_DURATION=0.18, WEAPON_FLASH_DURATION=0.06, ATTACK_COOLDOWN=0.25;
+  const WEAPON_OFFSET=4, WEAPON_LENGTH=20, WEAPON_THICKNESS=6, WEAPON_SWING_SPAN=20;
   const KNOCKBACK_DISTANCE=14, KNOCKBACK_DURATION=0.12;
   const SCREEN_FLASH_DURATION=0.12, SCREEN_FLASH_ALPHA=0.05;
   const SHAKE_DURATION=0.15, SHAKE_AMPLITUDE=6;
@@ -168,9 +173,10 @@
   const CHARGE_BULLET_SIZE = 4;
   let shakeTime=0, attacking=false, attackTime=0, weaponFlashTime=0, screenFlashTime=0, cooldownTime=0;
   let chargingShot=false, chargeTime=0, chargeReady=false;
+  let playerKbTime=0, playerKbVx=0, playerKbVy=0;
 
   function tryStartAttack(){
-    if (attacking || cooldownTime>0 || dashing) return;
+    if (attacking || cooldownTime>0 || dashing || playerKbTime>0) return;
     attacking=true; attackTime=0; weaponFlashTime=WEAPON_FLASH_DURATION; cooldownTime=ATTACK_COOLDOWN;
   }
 
@@ -218,7 +224,7 @@
     return facingToVector(facing);
   }
   function tryStartDash(){
-    if (dashing || dashCooldown>0 || gameOver) return;
+    if (dashing || dashCooldown>0 || gameOver || playerKbTime>0) return;
     const dir = getDashVector();
     dashSpeed = DASH_DISTANCE / DASH_DURATION;
     dashVx = dir.x * dashSpeed;
@@ -230,9 +236,14 @@
   }
 
   // --- Helpers ---
-  function easeOutQuad(t){ return 1-(1-t)*(1-t); }
   function rectsOverlap(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
   function center(o){ return {x:o.x+o.w/2,y:o.y+o.h/2}; }
+  function vectorToFacing(vx,vy){
+    const ax=Math.abs(vx), ay=Math.abs(vy);
+    if (ax<1e-4 && ay<1e-4) return null;
+    if (ax>ay) return vx>0?'right':'left';
+    return vy>0?'down':'up';
+  }
 
   // --- Loop ---
   let last=performance.now();
@@ -248,7 +259,19 @@
     if (dirOrder.length>0) facing=currentFacingFromOrder();
 
     // Movement
-    if (dashing){
+    if (playerKbTime>0){
+      const moveTime=Math.min(dt, playerKbTime);
+      player.x+=playerKbVx*moveTime; player.y+=playerKbVy*moveTime;
+      playerKbTime-=moveTime;
+      if (playerKbTime<=0){ playerKbVx=0; playerKbVy=0; }
+
+      const minX=BORDER_THICKNESS, minY=BORDER_THICKNESS;
+      const maxX=WIDTH-BORDER_THICKNESS-player.w, maxY=HEIGHT-BORDER_THICKNESS-player.h;
+      if (player.x<minX) player.x=minX;
+      if (player.y<minY) player.y=minY;
+      if (player.x>maxX) player.x=maxX;
+      if (player.y>maxY) player.y=maxY;
+    } else if (dashing){
       // Trail sample BEFORE moving this frame to avoid jitter
       trail.push({x:player.x, y:player.y, w:player.w, h:player.h, life:TRAIL_FADE});
       if (trail.length>TRAIL_SAMPLES) trail.shift();
@@ -320,9 +343,28 @@
 
       const c=center(e);
       let vx=pC.x-c.x, vy=pC.y-c.y; const dist=Math.hypot(vx,vy)||1; vx/=dist; vy/=dist;
+      const facingDir=vectorToFacing(vx,vy);
+      if (facingDir) e.facing=facingDir;
 
       if (e.type==='red'){
-        e.x+=vx*ENEMY_BASE_SPEED*dt; e.y+=vy*ENEMY_BASE_SPEED*dt;
+        e.attackCooldown=Math.max(0,(e.attackCooldown||0)-dt);
+        if (e.attacking){
+          e.attackTime+=dt;
+          if (e.attackTime>=ATTACK_DURATION){
+            e.attacking=false;
+            e.attackTime=0;
+            e.attackCooldown=ATTACK_COOLDOWN;
+          }
+        }
+        if (!e.attacking){
+          if (dist<=RED_ATTACK_RANGE && e.attackCooldown<=0){
+            e.attacking=true;
+            e.attackTime=0;
+            e.weaponHit=false;
+          } else {
+            e.x+=vx*ENEMY_BASE_SPEED*dt; e.y+=vy*ENEMY_BASE_SPEED*dt;
+          }
+        }
       } else if (e.type==='blue'){
         if (e.dashing){
           e.x+=e.dashVx*dt; e.y+=e.dashVy*dt; e.dashTime-=dt;
@@ -412,15 +454,36 @@
 
     // Attack hits (weapon)
     if (attacking){
-      const wRect=getWeaponRect(); let anyHit=false;
+      const wRect=getPlayerWeaponRect(); let anyHit=false;
+      let knockX=0, knockY=0;
+      const pCenter=center(player);
       for (const e of enemies){
         if (!e.alive) continue;
         if (rectsOverlap(wRect,e)){
           damageEnemy(e,1,wRect);
           anyHit=true;
+          const eCenter=center(e);
+          knockX+=pCenter.x-eCenter.x;
+          knockY+=pCenter.y-eCenter.y;
         }
       }
-      if (anyHit){ screenFlashTime=SCREEN_FLASH_DURATION; shakeTime=SHAKE_DURATION; }
+      if (anyHit){
+        screenFlashTime=SCREEN_FLASH_DURATION; shakeTime=SHAKE_DURATION;
+        applyPlayerKnockback(knockX, knockY);
+      }
+    }
+
+    // Enemy melee attacks
+    for (const e of enemies){
+      if (!e.alive || e.type!=='red' || !e.attacking || e.weaponHit) continue;
+      const wRect=getEnemyWeaponRect(e);
+      if (rectsOverlap(wRect, player)){
+        const ec=center(e), pc=center(player);
+        applyPlayerKnockback(pc.x-ec.x, pc.y-ec.y);
+        applyKnockback(e, player);
+        e.weaponHit=true;
+        damagePlayer(1);
+      }
     }
 
     // Dash contact damage
@@ -463,6 +526,11 @@
       return;
     }
     if (source) applyKnockback(enemy, source);
+    if (enemy.type==='red'){
+      enemy.attacking=false;
+      enemy.attackTime=0;
+      enemy.weaponHit=false;
+    }
     if (enemy.type==='blue'){ enemy.dashing=false; enemy.dashTime=0; }
   }
 
@@ -519,22 +587,49 @@
     target.kbVx=(vx*dist)/dur; target.kbVy=(vy*dist)/dur; target.kbTime=dur;
   }
 
-  function getWeaponRect(){
+  function applyPlayerKnockback(vx,vy){
+    if (!isFinite(vx) || !isFinite(vy)) return;
+    if (Math.abs(vx)<1e-4 && Math.abs(vy)<1e-4) return;
+    const len=Math.hypot(vx,vy)||1;
+    const dist=KNOCKBACK_DISTANCE, dur=KNOCKBACK_DURATION;
+    playerKbVx=(vx/len*dist)/dur;
+    playerKbVy=(vy/len*dist)/dur;
+    playerKbTime=dur;
+    if (dashing){ dashing=false; dashTime=0; dashHitSet.clear(); }
+  }
+
+  function computeWeaponRect(entity, facingDir, progress){
+    const t=Math.max(0,Math.min(1,progress));
+    const sweep=Math.sin(t*Math.PI - Math.PI/2); // -1 to 1
     let x,y,w,h;
-    if (facing==='up'){
-      w=LOOK_W; h=LOOK_H; x=player.x+(player.w-w)/2; y=player.y-h-PAD;
-      if (attacking) y-=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
-    } else if (facing==='down'){
-      w=LOOK_W; h=LOOK_H; x=player.x+(player.w-w)/2; y=player.y+player.h+PAD;
-      if (attacking) y+=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
-    } else if (facing==='left'){
-      w=LOOK_H; h=LOOK_W; x=player.x-w-PAD; y=player.y+(player.h-h)/2;
-      if (attacking) x-=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+    if (facingDir==='up'){
+      w=WEAPON_THICKNESS; h=WEAPON_LENGTH;
+      x=entity.x+(entity.w-w)/2 + sweep*(WEAPON_SWING_SPAN/2);
+      y=entity.y-WEAPON_OFFSET-h;
+    } else if (facingDir==='down'){
+      w=WEAPON_THICKNESS; h=WEAPON_LENGTH;
+      x=entity.x+(entity.w-w)/2 + sweep*(WEAPON_SWING_SPAN/2);
+      y=entity.y+entity.h+WEAPON_OFFSET;
+    } else if (facingDir==='left'){
+      w=WEAPON_LENGTH; h=WEAPON_THICKNESS;
+      x=entity.x-WEAPON_OFFSET-w;
+      y=entity.y+(entity.h-h)/2 + sweep*(WEAPON_SWING_SPAN/2);
     } else { // right
-      w=LOOK_H; h=LOOK_W; x=player.x+player.w+PAD; y=player.y+(player.h-h)/2;
-      if (attacking) x+=LUNGE_DISTANCE*easeOutQuad(Math.min(attackTime/ATTACK_DURATION,1));
+      w=WEAPON_LENGTH; h=WEAPON_THICKNESS;
+      x=entity.x+entity.w+WEAPON_OFFSET;
+      y=entity.y+(entity.h-h)/2 + sweep*(WEAPON_SWING_SPAN/2);
     }
     return {x,y,w,h};
+  }
+
+  function getPlayerWeaponRect(){
+    const progress=attacking?Math.min(attackTime/ATTACK_DURATION,1):0.5;
+    return computeWeaponRect(player, facing, progress);
+  }
+
+  function getEnemyWeaponRect(enemy){
+    const progress=enemy.attacking?Math.min(enemy.attackTime/ATTACK_DURATION,1):0.5;
+    return computeWeaponRect(enemy, enemy.facing||'down', progress);
   }
 
   function getShakeOffset(){
@@ -647,11 +742,19 @@
       ctx.restore();
     }
 
+    // Enemy weapons
+    for (const e of enemies){
+      if (!e.alive || e.type!=='red') continue;
+      const wr=getEnemyWeaponRect(e);
+      ctx.fillStyle=ENEMY_WEAPON_COLOR;
+      ctx.fillRect(Math.round(wr.x), Math.round(wr.y), wr.w, wr.h);
+    }
+
     // Weapon (hidden while dashing)
     if (!dashing){
-      const wr=getWeaponRect();
-      ctx.fillStyle=(weaponFlashTime>0)?'#fff':'#ff0';
-      ctx.fillRect(wr.x,wr.y,wr.w,wr.h);
+      const wr=getPlayerWeaponRect();
+      ctx.fillStyle=(weaponFlashTime>0)?'#fff':'#ff0000';
+      ctx.fillRect(Math.round(wr.x), Math.round(wr.y), wr.w, wr.h);
     }
 
     ctx.restore(); // end shake translate
